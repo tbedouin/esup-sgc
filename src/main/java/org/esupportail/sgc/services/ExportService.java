@@ -37,6 +37,34 @@ public class ExportService {
     @Resource
     UserDaoService userDaoService;
 
+    public List<Object[]> getEditableCsvRows(int firstResult, int maxResults) {
+        return userDaoService.selectEditableCsv()
+            .setFirstResult(firstResult)
+            .setMaxResults(maxResults)
+            .getResultList();
+    }
+
+    public ExportBean toEditableExportBean(Object[] item) {
+        ExportBean exportBean = new ExportBean();
+        exportBean.setEditable(item[0].toString());
+        String nom = "";
+        if(item[3] != null){
+            nom = item[1].toString();
+        }
+        exportBean.setNom(nom);
+        String prenom = "";
+        if(item[2] != null){
+            prenom = item[2].toString();
+        }
+        exportBean.setPrenom(prenom);
+        String email = "";
+        if(item[3] != null){
+            email = item[3].toString();
+        }
+        exportBean.setEmail(email);
+        return exportBean;
+    }
+
     public List<ExportBean> getBean(String stats, Locale locale) throws ParseException{
 		
 		List<Object[]> objs = new ArrayList<>();

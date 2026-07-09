@@ -38,6 +38,7 @@ import org.supercsv.prefs.CsvPreference;
 public class ImportExportController {
 	
 	private final Logger log = LoggerFactory.getLogger(getClass());
+    private static final int CSV_EXPORT_BATCH_SIZE = 1000;
 	
 	@Resource
 	ExportService exportService;
@@ -110,9 +111,24 @@ public class ImportExportController {
 		beanWriter.writeHeader(header);
 		
 		try{
-			List<ExportBean>  objs = exportService.getBean(stats, locale);
-			for(ExportBean item : objs) {
-				beanWriter.write(item, header);
+			if("editable".equals(stats)) {
+				int firstResult = 0;
+				while(true) {
+					List<Object[]> rows = exportService.getEditableCsvRows(firstResult, CSV_EXPORT_BATCH_SIZE);
+					if(rows.isEmpty()) {
+						break;
+					}
+					for(Object[] row : rows) {
+						beanWriter.write(exportService.toEditableExportBean(row), header);
+					}
+					beanWriter.flush();
+					firstResult += rows.size();
+				}
+			} else {
+				List<ExportBean>  objs = exportService.getBean(stats, locale);
+				for(ExportBean item : objs) {
+					beanWriter.write(item, header);
+				}
 			}
 			beanWriter.flush();
 			

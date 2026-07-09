@@ -7,6 +7,8 @@ import java.util.Arrays;
 import java.util.List;
 
 import jakarta.annotation.Resource;
+import jakarta.persistence.EntityManager;
+import jakarta.persistence.PersistenceContext;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
 import jakarta.validation.Valid;
@@ -44,6 +46,7 @@ import org.supercsv.prefs.CsvPreference;
 public class CrousErrorLogController {
 
 	private final Logger log = LoggerFactory.getLogger(getClass());
+    private static final int CSV_EXPORT_BATCH_SIZE = 1000;
 	
 	public final static String[] CSV_FIELDS = new String[] {"code", "message", "field", "crousOperation", "esupSgcOperation", "date", "blocking", "eppn", "ine", "name", "mail", "csn", "crousUrl"};
 	
@@ -74,6 +77,9 @@ public class CrousErrorLogController {
 
     @Resource
     CrousErrorLogDaoService crousErrorLogDaoService;
+
+    @PersistenceContext
+    transient EntityManager entityManager;
 	
 	@ModelAttribute("help")
 	public String getHelp() {
@@ -201,6 +207,7 @@ public class CrousErrorLogController {
     }
     
     
+    @Transactional(readOnly = true)
     @RequestMapping(method = RequestMethod.GET, params="csv")
     public void exportCsv2OutputStream(HttpServletResponse response) {	
    
@@ -218,10 +225,19 @@ public class CrousErrorLogController {
 			beanWriter.writeHeader(CSV_FIELDS);
 
             beanWriter.configureBeanMapping(CrousErrorLog.class, FIELD_MAPPING);
-			List<CrousErrorLog> logs = crousErrorLogDaoService.findAllCrousErrorLogs("date", "desc");
-			for(CrousErrorLog log : logs) {
-				beanWriter.write(log, CSV_PROCESSORS);
-			}		
+			int firstResult = 0;
+			while(true) {
+				List<CrousErrorLog> logs = crousErrorLogDaoService.findAllCrousErrorLogs("date", "desc", firstResult, CSV_EXPORT_BATCH_SIZE);
+				if(logs.isEmpty()) {
+					break;
+				}
+				for(CrousErrorLog log : logs) {
+					beanWriter.write(log, CSV_PROCESSORS);
+				}
+				beanWriter.flush();
+				entityManager.clear();
+				firstResult += logs.size();
+			}
 		} catch(Exception e){
 			log.warn("Interruption de l'export", e);
 		} finally {

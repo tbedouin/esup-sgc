@@ -5,6 +5,7 @@ import java.io.InputStream;
 import java.io.OutputStream;
 import java.io.OutputStreamWriter;
 import java.io.Writer;
+import java.nio.charset.StandardCharsets;
 import java.sql.SQLException;
 import java.util.*;
 import java.util.zip.ZipEntry;
@@ -13,8 +14,9 @@ import java.util.zip.ZipInputStream;
 import java.util.zip.ZipOutputStream;
 
 import jakarta.annotation.Resource;
+import jakarta.persistence.EntityManager;
+import jakarta.persistence.PersistenceContext;
 
-import jakarta.persistence.TypedQuery;
 import org.apache.commons.io.IOUtils;
 import org.esupportail.sgc.dao.CardDaoService;
 import org.esupportail.sgc.domain.Card;
@@ -40,6 +42,7 @@ public class ImportExportService {
 	private final Logger log = LoggerFactory.getLogger(getClass());
 
 	public final static String processorsDateType[] = new String[]{"requestDate", "dateEtat", "deliveredDate"};
+	private static final int CSV_EXPORT_BATCH_SIZE = 1000;
 	
 	private Boolean inWorking = false;
 
@@ -56,6 +59,9 @@ public class ImportExportService {
 
     @Resource
     CrousSmartCardEntryService crousSmartCardEntryService;
+
+    @PersistenceContext
+    transient EntityManager entityManager;
 
 	public Boolean isInWorking() {
 		return inWorking;
@@ -131,10 +137,9 @@ public class ImportExportService {
 	}
 
 
+	@Transactional(readOnly = true)
 	public void exportCsv2OutputStream(CardSearchBean searchBean, String eppn, List<String> fields, OutputStream outputStream) {
-
 		CsvDozerBeanWriter beanWriter = null;
-		
 		Writer writer = null;
 		String[] FIELD_MAPPING = new String[fields.size()];
 		int i = 0;
@@ -144,7 +149,9 @@ public class ImportExportService {
 		}
 		
 		try{
-			writer = new OutputStreamWriter(outputStream, "UTF8");
+			long totalCards = cardDaoService.countFindCards(searchBean, eppn);
+			log.info("CSV export start: {} cards, {} fields, batchSize={}", totalCards, fields.size(), CSV_EXPORT_BATCH_SIZE);
+			writer = new OutputStreamWriter(outputStream, StandardCharsets.UTF_8);
 
 			beanWriter =  new CsvDozerBeanWriter(writer, CsvPreference.EXCEL_NORTH_EUROPE_PREFERENCE);
 
@@ -154,14 +161,30 @@ public class ImportExportService {
 
 			beanWriter.writeHeader(headerFr);
 			
-			final CellProcessor[] processors = this.getProcessors(fieldsProperties);
+			final CellProcessor[] processors = this.getProcessors(fields);
 
             beanWriter.configureBeanMapping(Card.class, FIELD_MAPPING);
 
-			List<Card> cards = cardDaoService.findCards(searchBean, eppn, null, null).getResultList();
-			for(Card card : cards) {
-				beanWriter.write(card,processors);
-			}		
+			int firstResult = 0;
+			long exportedCards = 0;
+			while(true) {
+				List<Card> cards = cardDaoService.findCards(searchBean, eppn, null, null)
+					.setFirstResult(firstResult)
+					.setMaxResults(CSV_EXPORT_BATCH_SIZE)
+					.getResultList();
+				if(cards.isEmpty()) {
+					break;
+				}
+				for(Card card : cards) {
+					beanWriter.write(card, processors);
+					exportedCards++;
+				}
+				beanWriter.flush();
+				log.trace("CSV export progress: {}/{} cards written, heapUsed={} MB", exportedCards, totalCards, usedHeapMb());
+				entityManager.clear();
+				firstResult += cards.size();
+			}
+			log.info("CSV export done: {} cards written", exportedCards);
 		} catch(Exception e){
 			log.warn("Interruption de l'export", e);
 		} finally {
@@ -182,58 +205,102 @@ public class ImportExportService {
 		}
 	}
 
-    public void addCsvCardsToZip(TypedQuery<Card> cardsTypedQuery, ZipOutputStream zos) throws IOException {
+	private long usedHeapMb() {
+		Runtime runtime = Runtime.getRuntime();
+		long usedBytes = runtime.totalMemory() - runtime.freeMemory();
+		return usedBytes / (1024 * 1024);
+	}
+
+    public void addCsvCardsToZip(CardSearchBean searchBean, String eppn, ZipOutputStream zos) throws IOException {
         ZipEntry fileEntry = new ZipEntry("cards.csv");
         zos.putNextEntry(fileEntry);
         String header =  "encodedDate;lastEncodedDate;csn;crous;access-control-id;eppn;difPhoto;id;etat;generatedIds;qrcode";
-        zos.write(header.getBytes());
-        zos.write(System.lineSeparator().getBytes());
-        for(Card card : cardsTypedQuery.getResultList()) {
-            String csvLine = importExportCardService.exportCsvLine(card);
-            zos.write(csvLine.getBytes());
-            zos.write(System.lineSeparator().getBytes());
+        zos.write(header.getBytes(StandardCharsets.UTF_8));
+        zos.write(System.lineSeparator().getBytes(StandardCharsets.UTF_8));
+        int firstResult = 0;
+        while (true) {
+            List<Card> cards = cardDaoService.findCards(searchBean, eppn, null, null)
+                .setFirstResult(firstResult)
+                .setMaxResults(CSV_EXPORT_BATCH_SIZE)
+                .getResultList();
+            if (cards.isEmpty()) {
+                break;
+            }
+            for(Card card : cards) {
+                String csvLine = importExportCardService.exportCsvLine(card);
+                zos.write(csvLine.getBytes(StandardCharsets.UTF_8));
+                zos.write(System.lineSeparator().getBytes(StandardCharsets.UTF_8));
+            }
+            zos.flush();
+            entityManager.clear();
+            firstResult += cards.size();
         }
         zos.closeEntry();
     }
 
-    public void addCrousCsvCardsToZip(TypedQuery<Card> cardsTypedQuery, ZipOutputStream zos) throws IOException {
+    public void addCrousCsvCardsToZip(CardSearchBean searchBean, String eppn, ZipOutputStream zos) throws IOException {
         ZipEntry fileEntry = new ZipEntry("crous_cards.csv");
         zos.putNextEntry(fileEntry);
         String header = "PIX.SS;PIX.NN;AAPL;NUM_PROTOCOLAIRE;NUM_APPLICATIF;NFO;CNOUS;CROUS;EMETTEUR;MAPPING;NUM_CARTE;DATE_CREATION";
-        zos.write(header.getBytes());
-        zos.write(System.lineSeparator().getBytes());
-        for(Card card : cardsTypedQuery.getResultList()) {
-            if(card.getUserAccount() != null && card.getUserAccount().getCrous() != null) {
-                String csvLine = crousSmartCardEntryService.exportCrousCsvLine(card);
-                if(csvLine != null) {
-                    zos.write(csvLine.getBytes());
-                    zos.write(System.lineSeparator().getBytes());
+        zos.write(header.getBytes(StandardCharsets.UTF_8));
+        zos.write(System.lineSeparator().getBytes(StandardCharsets.UTF_8));
+        int firstResult = 0;
+        while (true) {
+            List<Card> cards = cardDaoService.findCards(searchBean, eppn, null, null)
+                .setFirstResult(firstResult)
+                .setMaxResults(CSV_EXPORT_BATCH_SIZE)
+                .getResultList();
+            if (cards.isEmpty()) {
+                break;
+            }
+            for(Card card : cards) {
+                if(card.getUserAccount() != null && card.getUserAccount().getCrous() != null) {
+                    String csvLine = crousSmartCardEntryService.exportCrousCsvLine(card);
+                    if(csvLine != null) {
+                        zos.write(csvLine.getBytes(StandardCharsets.UTF_8));
+                        zos.write(System.lineSeparator().getBytes(StandardCharsets.UTF_8));
+                    }
                 }
             }
+            zos.flush();
+            entityManager.clear();
+            firstResult += cards.size();
         }
         zos.closeEntry();
     }
 
-    public void addPhotosCardsToZip(TypedQuery<Card> cardsTypedQuery, ZipOutputStream zos) throws IOException, SQLException {
+    public void addPhotosCardsToZip(CardSearchBean searchBean, String eppn, ZipOutputStream zos) throws IOException, SQLException {
         ZipEntry folderEntry = new ZipEntry("photos/");
         zos.putNextEntry(folderEntry);
         zos.closeEntry();
-        for(Card card : cardsTypedQuery.getResultList()) {
-            if(card.getPhotoFile() != null) {
-                ZipEntry photoEntry = new ZipEntry("photos/" + card.getId() + ".jpg");
-                zos.putNextEntry(photoEntry);
-                importExportCardService.putPhotoInStream(card, zos);
-                zos.closeEntry();
+        int firstResult = 0;
+        while (true) {
+            List<Card> cards = cardDaoService.findCards(searchBean, eppn, null, null)
+                .setFirstResult(firstResult)
+                .setMaxResults(CSV_EXPORT_BATCH_SIZE)
+                .getResultList();
+            if (cards.isEmpty()) {
+                break;
             }
+            for(Card card : cards) {
+                if(card.getPhotoFile() != null) {
+                    ZipEntry photoEntry = new ZipEntry("photos/" + card.getId() + ".jpg");
+                    zos.putNextEntry(photoEntry);
+                    importExportCardService.putPhotoInStream(card, zos);
+                    zos.closeEntry();
+                }
+            }
+            zos.flush();
+            entityManager.clear();
+            firstResult += cards.size();
         }
     }
 
-    @Transactional
+    @Transactional(readOnly = true)
     public void exportToZip(CardSearchBean searchBean, ZipOutputStream zos) throws IOException, SQLException {
-       TypedQuery<Card> cardsTypedQuery = cardDaoService.findCards(searchBean, null, null, null);
-       addCsvCardsToZip(cardsTypedQuery, zos);
-       addCrousCsvCardsToZip(cardsTypedQuery, zos);
-       addPhotosCardsToZip(cardsTypedQuery, zos);
+       addCsvCardsToZip(searchBean, null, zos);
+       addCrousCsvCardsToZip(searchBean, null, zos);
+       addPhotosCardsToZip(searchBean, null, zos);
     }
 
     @Async
